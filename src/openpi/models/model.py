@@ -1,4 +1,4 @@
-import abc
+import abc # 抽象基类模块 规定子类需要实现哪些接口
 from collections.abc import Sequence
 import dataclasses
 import enum
@@ -7,14 +7,14 @@ import pathlib
 from typing import Generic, TypeVar
 
 import augmax
-from flax import nnx
+from flax import nnx # 神经网络扩展库 基于JAX构建神经网络
 from flax import struct
 from flax import traverse_util
 import jax
 import jax.numpy as jnp
 import numpy as np
 import orbax.checkpoint as ocp
-import safetensors
+import safetensors # 安全高效地加载和保存张量数据的库
 import torch
 
 from openpi.models_pytorch import pi0_pytorch
@@ -131,6 +131,7 @@ class Observation(Generic[ArrayT]):
     def to_dict(self) -> at.PyTree[ArrayT]:
         """Convert the Observation to a nested dict."""
         result = dataclasses.asdict(self)
+        # 将字段名调整为模型输入所期望的格式
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
         return result
@@ -170,7 +171,8 @@ def preprocess_observation(
             image = image / 2.0 + 0.5
 
             transforms = []
-            if "wrist" not in key:
+            if "wrist" not in key: 
+                # 对非腕部图像进行轻微几何变化以增强模型的鲁棒性。对于腕部图像，几何变化可能会导致模型性能下降。
                 height, width = image.shape[1:3]
                 transforms += [
                     augmax.RandomCrop(int(width * 0.95), int(height * 0.95)),
@@ -178,7 +180,7 @@ def preprocess_observation(
                     augmax.Rotate((-5, 5)),
                 ]
             transforms += [
-                augmax.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5),
+                augmax.ColorJitter(brightness=0.3, contrast=0.4, saturation=0.5), # 颜色抖动增强模拟不同光照和相机的效果
             ]
             sub_rngs = jax.random.split(rng, image.shape[0])
             image = jax.vmap(augmax.Chain(*transforms))(sub_rngs, image)
@@ -193,9 +195,9 @@ def preprocess_observation(
     for key in out_images:
         if key not in observation.image_masks:
             # do not mask by default
-            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool)
+            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool) # 生成一个全为True的布尔数组，表示所有图像都是有效的
         else:
-            out_masks[key] = jnp.asarray(observation.image_masks[key])
+            out_masks[key] = jnp.asarray(observation.image_masks[key]) # 将图像掩码转换为JAX数组
 
     return Observation(
         images=out_images,

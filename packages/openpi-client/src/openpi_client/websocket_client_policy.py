@@ -23,7 +23,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         if port is not None:
             self._uri += f":{port}"
         self._packer = msgpack_numpy.Packer()
-        self._api_key = api_key
+        self._api_key = api_key # API密钥
         self._ws, self._server_metadata = self._wait_for_server()
 
     def get_server_metadata(self) -> Dict:
@@ -36,8 +36,8 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
                 conn = websockets.sync.client.connect(
                     self._uri, compression=None, max_size=None, additional_headers=headers
-                )
-                metadata = msgpack_numpy.unpackb(conn.recv())
+                ) # 连接到websocket服务器
+                metadata = msgpack_numpy.unpackb(conn.recv()) # 接收服务器发送的元数据并反序列化为python对象
                 return conn, metadata
             except ConnectionRefusedError:
                 logging.info("Still waiting for server...")

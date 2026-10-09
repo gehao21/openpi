@@ -3,7 +3,7 @@ import enum
 import logging
 import socket
 
-import tyro
+import tyro # 命令行参数解析库
 
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
@@ -104,8 +104,8 @@ def main(args: Args) -> None:
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
 
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
+    hostname = socket.gethostname() # Get the hostname of the machine
+    local_ip = socket.gethostbyname(hostname) # Get the local IP address of the machine
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
     server = websocket_policy_server.WebsocketPolicyServer(
@@ -114,7 +114,7 @@ def main(args: Args) -> None:
         port=args.port,
         metadata=policy_metadata,
     )
-    server.serve_forever()
+    server.serve_forever() # Start the server and keep it running indefinitely
 
 
 if __name__ == "__main__":

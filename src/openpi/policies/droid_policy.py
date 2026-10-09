@@ -1,6 +1,6 @@
 import dataclasses
 
-import einops
+import einops # 重排和组合张量的python库
 import numpy as np
 
 from openpi import transforms
@@ -10,29 +10,31 @@ from openpi.models import model as _model
 def make_droid_example() -> dict:
     """Creates a random input example for the Droid policy."""
     return {
-        "observation/exterior_image_1_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/wrist_image_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8),
-        "observation/joint_position": np.random.rand(7),
-        "observation/gripper_position": np.random.rand(1),
+        "observation/exterior_image_1_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8), # 外部图像
+        "observation/wrist_image_left": np.random.randint(256, size=(224, 224, 3), dtype=np.uint8), # 腕部图像
+        "observation/joint_position": np.random.rand(7), # 关节角度
+        "observation/gripper_position": np.random.rand(1), # 夹爪位置
         "prompt": "do something",
     }
 
 
 def _parse_image(image) -> np.ndarray:
+    """parses an image to ensure it is in the correct format (H, W, C) and dtype (uint8)."""
     image = np.asarray(image)
     if np.issubdtype(image.dtype, np.floating):
-        image = (255 * image).astype(np.uint8)
+        image = (255 * image).astype(np.uint8) # 0-1 float to 0-255 uint8
     if image.shape[0] == 3:
         image = einops.rearrange(image, "c h w -> h w c")
     return image
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True) # anotation for data classes, frozen=True makes the instance immutable
 class DroidInputs(transforms.DataTransformFn):
     # Determines which model will be used.
     model_type: _model.ModelType
 
     def __call__(self, data: dict) -> dict:
+        """Converts the input data to the expected format for the Droid policy."""
         gripper_pos = np.asarray(data["observation/gripper_position"])
         if gripper_pos.ndim == 0:
             # Ensure gripper position is a 1D array, not a scalar, so we can concatenate with joint positions
@@ -58,7 +60,7 @@ class DroidInputs(transforms.DataTransformFn):
                 raise ValueError(f"Unsupported model type: {self.model_type}")
 
         inputs = {
-            "state": state,
+            "state": state, # 关节角度 + 夹爪位置
             "image": dict(zip(names, images, strict=True)),
             "image_mask": dict(zip(names, image_masks, strict=True)),
         }
@@ -76,6 +78,7 @@ class DroidInputs(transforms.DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class DroidOutputs(transforms.DataTransformFn):
+    """outputs from the Droid policy. This class is used to convert outputs from the model to the expected format."""
     def __call__(self, data: dict) -> dict:
         # Only return the first 8 dims.
         return {"actions": np.asarray(data["actions"][..., :8])}
