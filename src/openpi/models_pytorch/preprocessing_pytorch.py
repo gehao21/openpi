@@ -55,6 +55,7 @@ def preprocess_observation_pytorch(
 
             # Apply PyTorch-based augmentations
             if "wrist" not in key:
+                # 对非腕部图像做数据增广
                 # Geometric augmentations for non-wrist cameras
                 height, width = image.shape[1:3]
 

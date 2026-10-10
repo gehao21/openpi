@@ -13,7 +13,7 @@ from flax import traverse_util
 import jax
 import jax.numpy as jnp
 import numpy as np
-import orbax.checkpoint as ocp
+import orbax.checkpoint as ocp # 检查点管理库 用于保存和恢复模型参数
 import safetensors # 安全高效地加载和保存张量数据的库
 import torch
 
@@ -223,8 +223,8 @@ class BaseModelConfig(abc.ABC):
     # Tokenized prompt maximum length.
     max_token_len: int
 
-    @property
-    @abc.abstractmethod
+    @property # 伪装成属性访问
+    @abc.abstractmethod # 抽象方法，子类必须实现该方法
     def model_type(self) -> ModelType:
         """The model type."""
 
@@ -234,15 +234,16 @@ class BaseModelConfig(abc.ABC):
 
     def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "BaseModel":
         """Create a model with the given parameters."""
-        model = nnx.eval_shape(self.create, jax.random.key(0))
-        graphdef, state = nnx.split(model)
+        model = nnx.eval_shape(self.create, jax.random.key(0)) # 通过eval_shape方法获取模型的结构和参数形状，而不实际执行前向计算
+        graphdef, state = nnx.split(model) # 将模型拆分为图定义和状态
         if remove_extra_params:
-            params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)
+            params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params) # 移除params中多余的参数，只保留state中存在的参数
         at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
-        state.replace_by_pure_dict(params)
-        return nnx.merge(graphdef, state)
+        state.replace_by_pure_dict(params) # 将state的参数替换为params中的参数
+        return nnx.merge(graphdef, state) # 将图定义和状态合并为一个完整的模型 带了真实权重的完整模型
 
     def load_pytorch(self, train_config, weight_path: str):
+        """Load a PyTorch model from a safetensors file."""
         logger.info(f"train_config: {train_config}")
         model = pi0_pytorch.PI0Pytorch(config=train_config.model)
         safetensors.torch.load_model(model, weight_path)
@@ -253,10 +254,12 @@ class BaseModelConfig(abc.ABC):
         """Returns the input specification for the model. Values are jax.ShapeDtypeStruct."""
 
     def fake_obs(self, batch_size: int = 1) -> Observation:
+        """create a fake observation with the same shape and dtype as the model input spec. Useful for testing."""
         observation_spec, _ = self.inputs_spec(batch_size=batch_size)
         return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), observation_spec)
 
     def fake_act(self, batch_size: int = 1) -> Actions:
+        """create a fake action with the same shape and dtype as the model input spec. Useful for testing."""
         _, action_spec = self.inputs_spec(batch_size=batch_size)
         return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), action_spec)
 
@@ -313,6 +316,7 @@ def restore_params(
         sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
     with ocp.PyTreeCheckpointer() as ckptr:
+        # 不仅支持从本体文件系统加载参数，还支持从Google Cloud Storage加载参数
         metadata = ckptr.metadata(params_path)
         item = {"params": metadata["params"]}
 
