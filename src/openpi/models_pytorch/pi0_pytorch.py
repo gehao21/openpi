@@ -6,8 +6,8 @@ from torch import Tensor
 from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
-import openpi.models.gemma as _gemma
-from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
+import openpi.models.gemma as _gemma # 导入 gemma 模块
+from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel # 导入 PaliGemmaWithExpertModel 类
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
 
 
@@ -43,6 +43,7 @@ def create_sinusoidal_pos_embedding(
 
 
 def sample_beta(alpha, beta, bsize, device):
+    """Sample from a Beta distribution using PyTorch."""
     alpha_t = torch.as_tensor(alpha, dtype=torch.float32, device=device)
     beta_t = torch.as_tensor(beta, dtype=torch.float32, device=device)
     dist = torch.distributions.Beta(alpha_t, beta_t)
@@ -83,9 +84,10 @@ def make_att_2d_masks(pad_masks, att_masks):
 
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
+        """Initialize the PI0Pytorch model with the given configuration."""
         super().__init__()
         self.config = config
-        self.pi05 = config.pi05
+        self.pi05 = config.pi05 # flag决定是否使用pi05模型还是pi0模型
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -100,6 +102,7 @@ class PI0Pytorch(nn.Module):
         self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
 
+        # pi0和pi05在FlowMatching时处理时间嵌入的方式不同
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
             self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
@@ -108,7 +111,7 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
-        torch.set_float32_matmul_precision("high")
+        torch.set_float32_matmul_precision("high") # 设置浮点运算精度
         if config.pytorch_compile_mode is not None:
             self.sample_actions = torch.compile(self.sample_actions, mode=config.pytorch_compile_mode)
 
@@ -180,8 +183,8 @@ class PI0Pytorch(nn.Module):
         )
 
     def sample_time(self, bsize, device):
-        time_beta = sample_beta(1.5, 1.0, bsize, device)
-        time = time_beta * 0.999 + 0.001
+        time_beta = sample_beta(1.5, 1.0, bsize, device) # beta分布采样，参数为(1.5, 1.0)
+        time = time_beta * 0.999 + 0.001 # 将采样结果缩放到[0.001, 1.0]范围内，避免为0
         return time.to(dtype=torch.float32, device=device)
 
     def embed_prefix(
@@ -200,33 +203,33 @@ class PI0Pytorch(nn.Module):
             def image_embed_func(img):
                 return self.paligemma_with_expert.embed_image(img)
 
-            img_emb = self._apply_checkpoint(image_embed_func, img)
+            img_emb = self._apply_checkpoint(image_embed_func, img) # shape: [B, num_img_embs, emb_dim]
 
             bsize, num_img_embs = img_emb.shape[:2]
 
             embs.append(img_emb)
-            pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
+            pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs)) # shape: [B, num_img_embs]
 
             # Create attention masks so that image tokens attend to each other
-            att_masks += [0] * num_img_embs
+            att_masks += [0] * num_img_embs # shape : [num_img_embs]
 
         # Process language tokens
         def lang_embed_func(lang_tokens):
-            lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens)
-            lang_emb_dim = lang_emb.shape[-1]
-            return lang_emb * math.sqrt(lang_emb_dim)
+            lang_emb = self.paligemma_with_expert.embed_language_tokens(lang_tokens) # shape: [B, num_lang_embs, emb_dim]
+            lang_emb_dim = lang_emb.shape[-1] 
+            return lang_emb * math.sqrt(lang_emb_dim) # scale the embeddings by the square root of the embedding dimension
 
-        lang_emb = self._apply_checkpoint(lang_embed_func, lang_tokens)
+        lang_emb = self._apply_checkpoint(lang_embed_func, lang_tokens) # shape: [B, num_lang_embs, emb_dim]
 
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
 
         # full attention between image and language inputs
         num_lang_embs = lang_emb.shape[1]
-        att_masks += [0] * num_lang_embs
+        att_masks += [0] * num_lang_embs # shape : [num_img_embs + num_lang_embs]
 
-        embs = torch.cat(embs, dim=1)
-        pad_masks = torch.cat(pad_masks, dim=1)
+        embs = torch.cat(embs, dim=1) # shape: [B, num_img_embs + num_lang_embs, emb_dim]
+        pad_masks = torch.cat(pad_masks, dim=1) # shape: [B, num_img_embs + num_lang_embs]
         att_masks = torch.tensor(att_masks, dtype=torch.bool, device=pad_masks.device)
 
         # Get batch size from the first dimension of the concatenated tensors
@@ -241,7 +244,13 @@ class PI0Pytorch(nn.Module):
         pad_masks = []
         att_masks = []
 
+        """
+        pi0和pi05在处理state输入时方法不同
+        pi0 通过 state_proj 线性层映射到state embedding
+        pi05 suffix 里不单独添加连续 state token state 通常会在预处理时离散化并放进文本 token 序列，也就是前缀输入的一部分
+        """
         if not self.pi05:
+            # pi0 特殊处理 state embedding 通过 state_proj 线性层
             if self.state_proj.weight.dtype == torch.float32:
                 state = state.to(torch.float32)
 
@@ -249,14 +258,14 @@ class PI0Pytorch(nn.Module):
             def state_proj_func(state):
                 return self.state_proj(state)
 
-            state_emb = self._apply_checkpoint(state_proj_func, state)
+            state_emb = self._apply_checkpoint(state_proj_func, state) # shape: [B, state_emb_dim]
 
-            embs.append(state_emb[:, None, :])
+            embs.append(state_emb[:, None, :]) # append shape: [B, 1, state_emb_dim]
             bsize = state_emb.shape[0]
             device = state_emb.device
 
-            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device)
-            pad_masks.append(state_mask)
+            state_mask = torch.ones(bsize, 1, dtype=torch.bool, device=device) # shape: [B, 1] 全部为1表示state token有效
+            pad_masks.append(state_mask) 
 
             # Set attention masks so that image and language inputs do not attend to state or actions
             att_masks += [1]
@@ -265,17 +274,21 @@ class PI0Pytorch(nn.Module):
         time_emb = create_sinusoidal_pos_embedding(
             timestep, self.action_in_proj.out_features, min_period=4e-3, max_period=4.0, device=timestep.device
         )
-        time_emb = time_emb.type(dtype=timestep.dtype)
+        time_emb = time_emb.type(dtype=timestep.dtype) # shape: [B, action_emb_dim]
 
         # Fuse timestep + action information using an MLP
         def action_proj_func(noisy_actions):
             return self.action_in_proj(noisy_actions)
 
-        action_emb = self._apply_checkpoint(action_proj_func, noisy_actions)
+        action_emb = self._apply_checkpoint(action_proj_func, noisy_actions) # shape: [B, action_horizon, action_emb_dim]
 
+
+        """两种模型都让网络获得去噪时间信息 只是注入位置不同
+        pi0 在动作输入处拼接并经 MLP 融合
+        pi05 把它作为 Action Expert 各层归一化的条件"""
         if not self.pi05:
-            time_emb = time_emb[:, None, :].expand_as(action_emb)
-            action_time_emb = torch.cat([action_emb, time_emb], dim=2)
+            time_emb = time_emb[:, None, :].expand_as(action_emb) # shape: [B, action_horizon, action_emb_dim]
+            action_time_emb = torch.cat([action_emb, time_emb], dim=2) # shape: [B, action_horizon, 2 * action_emb_dim]
 
             # Apply MLP layers
             def mlp_func(action_time_emb):
@@ -283,7 +296,7 @@ class PI0Pytorch(nn.Module):
                 x = F.silu(x)  # swish == silu
                 return self.action_time_mlp_out(x)
 
-            action_time_emb = self._apply_checkpoint(mlp_func, action_time_emb)
+            action_time_emb = self._apply_checkpoint(mlp_func, action_time_emb) # shape: [B, action_horizon, action_emb_dim]
             adarms_cond = None
         else:
             # time MLP (for adaRMS)
@@ -294,20 +307,20 @@ class PI0Pytorch(nn.Module):
                 return F.silu(x)
 
             time_emb = self._apply_checkpoint(time_mlp_func, time_emb)
-            action_time_emb = action_emb
+            action_time_emb = action_emb # shape: [B, action_horizon, action_emb_dim]
             adarms_cond = time_emb
 
         # Add to input tokens
-        embs.append(action_time_emb)
+        embs.append(action_time_emb) 
 
         bsize, action_time_dim = action_time_emb.shape[:2]
-        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device)
+        action_time_mask = torch.ones(bsize, action_time_dim, dtype=torch.bool, device=timestep.device) # shape: [B, action_horizon] 全部为1表示action token有效
         pad_masks.append(action_time_mask)
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
         att_masks += [1] + ([0] * (self.config.action_horizon - 1))
 
-        embs = torch.cat(embs, dim=1)
+        embs = torch.cat(embs, dim=1) 
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
@@ -324,9 +337,9 @@ class PI0Pytorch(nn.Module):
         if time is None:
             time = self.sample_time(actions.shape[0], actions.device)
 
-        time_expanded = time[:, None, None]
+        time_expanded = time[:, None, None] # shape: [B, 1, 1] to match the shape of actions and noise for broadcasting
         x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+        u_t = noise - actions # 训练目标是预测噪声减去动作的残差 动作->噪声的方向
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self.embed_suffix(state, x_t, time)
@@ -337,11 +350,11 @@ class PI0Pytorch(nn.Module):
             suffix_embs = suffix_embs.to(dtype=torch.bfloat16)
             prefix_embs = prefix_embs.to(dtype=torch.bfloat16)
 
-        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
-        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1) # shape: [B, prefix_len + suffix_len]
+        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1) # shape: [B, prefix_len + suffix_len]
 
         att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
-        position_ids = torch.cumsum(pad_masks, dim=1) - 1
+        position_ids = torch.cumsum(pad_masks, dim=1) - 1 
 
         # Prepare attention masks
         att_2d_masks_4d = self._prepare_attention_masks_4d(att_2d_masks)
@@ -360,9 +373,9 @@ class PI0Pytorch(nn.Module):
 
         suffix_out = self._apply_checkpoint(
             forward_func, prefix_embs, suffix_embs, att_2d_masks_4d, position_ids, adarms_cond
-        )
+        ) # suffix_out shape: [B, suffix_len, action_emb_dim]
 
-        suffix_out = suffix_out[:, -self.config.action_horizon :]
+        suffix_out = suffix_out[:, -self.config.action_horizon :] # shape: [B, action_horizon, action_emb_dim]
         suffix_out = suffix_out.to(dtype=torch.float32)
 
         # Apply gradient checkpointing to final action projection if enabled
@@ -417,7 +430,7 @@ class PI0Pytorch(nn.Module):
             # Euler step - use new tensor assignment instead of in-place operation
             x_t = x_t + dt * v_t
             time += dt
-        return x_t
+        return x_t # shape: [B, action_horizon, action_dim]
 
     def denoise_step(
         self,
@@ -457,6 +470,6 @@ class PI0Pytorch(nn.Module):
         )
 
         suffix_out = outputs_embeds[1]
-        suffix_out = suffix_out[:, -self.config.action_horizon :]
+        suffix_out = suffix_out[:, -self.config.action_horizon :] # shape: [B, action_horizon, action_emb_dim]
         suffix_out = suffix_out.to(dtype=torch.float32)
-        return self.action_out_proj(suffix_out)
+        return self.action_out_proj(suffix_out) # shape: [B, action_horizon, action_dim]

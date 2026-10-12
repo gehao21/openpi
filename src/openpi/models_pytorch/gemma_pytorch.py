@@ -160,6 +160,7 @@ class PaliGemmaWithExpertModel(nn.Module):
             num_layers = self.paligemma.config.text_config.num_hidden_layers
 
             # Check if gradient checkpointing is enabled for any of the models
+            # gradient checkpointing is a technique to save memory during training by not storing intermediate activations and recomputing them during the backward pass. This is useful for large models that may not fit in memory otherwise.
             use_gradient_checkpointing = (
                 hasattr(self.gemma_expert.model, "gradient_checkpointing")
                 and self.gemma_expert.model.gradient_checkpointing
@@ -188,6 +189,7 @@ class PaliGemmaWithExpertModel(nn.Module):
 
             # Define the complete layer computation function for gradient checkpointing
             def compute_layer_complete(layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond):
+                """每一层分别计算QKV然后联合拼接计算注意力，然后再分别计算每一层的输出"""
                 models = [self.paligemma.language_model, self.gemma_expert.model]
 
                 query_states = []
@@ -195,22 +197,23 @@ class PaliGemmaWithExpertModel(nn.Module):
                 value_states = []
                 gates = []
                 for i, hidden_states in enumerate(inputs_embeds):
-                    layer = models[i].layers[layer_idx]
+                    layer = models[i].layers[layer_idx] 
+                    # (B, seq_len, embed_dim)
                     hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
                     gates.append(gate)
 
-                    input_shape = hidden_states.shape[:-1]
-                    hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
-                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    input_shape = hidden_states.shape[:-1] # (B, seq_len)
+                    hidden_shape = (*input_shape, -1, layer.self_attn.head_dim) # (B, seq_len, num_heads, head_dim)
+                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2) # (B, num_heads, seq_len, head_dim)
                     key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
                     value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
 
-                    query_states.append(query_state)
+                    query_states.append(query_state) # 
                     key_states.append(key_state)
                     value_states.append(value_state)
 
                 # Concatenate and process attention
-                query_states = torch.cat(query_states, dim=2)
+                query_states = torch.cat(query_states, dim=2) # 联合拼接 (B, num_heads, seq_len1 + seq_len2, head_dim)
                 key_states = torch.cat(key_states, dim=2)
                 value_states = torch.cat(value_states, dim=2)
 
@@ -220,8 +223,8 @@ class PaliGemmaWithExpertModel(nn.Module):
                     query_states.shape[-1],
                     device=query_states.device,
                     dtype=query_states.dtype,
-                )
-                cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
+                ) # (B, seq_len1 + seq_len2, head_dim)
+                cos, sin = self.paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids) # 计算旋转嵌入的余弦和正弦 (B, seq_len1 + seq_len2, head_dim)
                 query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
                     query_states, key_states, cos, sin, unsqueeze_dim=1
                 )
@@ -240,18 +243,18 @@ class PaliGemmaWithExpertModel(nn.Module):
                 )
                 # Get head_dim from the current layer, not from the model
                 head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim
-                att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim)
+                att_output = att_output.reshape(batch_size, -1, 1 * 8 * head_dim) # Reshape to (B, seq_len1 + seq_len2, embed_dim)
 
                 # Process layer outputs
                 outputs_embeds = []
                 start_pos = 0
                 for i, hidden_states in enumerate(inputs_embeds):
                     layer = models[i].layers[layer_idx]
-                    end_pos = start_pos + hidden_states.shape[1]
+                    end_pos = start_pos + hidden_states.shape[1] # 计算每个模型的输出序列长度
 
                     if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
                         att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
+                    out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos]) # (B, seq_len, embed_dim)
 
                     # first residual
                     out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
